@@ -161,3 +161,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, user_id: str):
             "user": user_id,
             "message": f"{user_id} has left the game."
         })
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)
