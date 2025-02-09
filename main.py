@@ -8,7 +8,11 @@ app = FastAPI()
 # Configure CORS so that your frontend can connect.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost", "http://127.0.0.1"],  # Update this later for deployment.
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3003",
+        "https://fadu-frontend.onrender.com"  # Your frontend URL on Render
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
