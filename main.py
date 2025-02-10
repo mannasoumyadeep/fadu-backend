@@ -1,17 +1,17 @@
-# main.py
+import os
+import random
+import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-import random, json
 
 app = FastAPI()
 
-# Configure CORS so that your frontend can connect.
+# Update allowed origins with your deployed frontend URL.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3003",
-        "https://fadu-frontend.onrender.com"  # Your frontend URL on Render
+        "http://localhost:3000",                   # Local development
+        "https://fadu-frontend.onrender.com"         # Deployed frontend URL on Render
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -23,8 +23,7 @@ app.add_middleware(
 # -------------------------------
 class ConnectionManager:
     def __init__(self):
-        # Maps room_id to a list of WebSocket connections.
-        self.active_connections = {}
+        self.active_connections = {}  # Maps room_id to list of connections
 
     async def connect(self, room_id: str, websocket: WebSocket):
         await websocket.accept()
@@ -66,7 +65,7 @@ async def read_root():
     return {"message": "Hello from Fadu backend!"}
 
 @app.websocket("/ws/{room_id}/{user_id}")
-async def websocket_endpoint(websocket: WebSocket, room_id: str, user_id: str):
+async def websocket_endpoint(websocket, room_id: str, user_id: str):
     await manager.connect(room_id, websocket)
     try:
         # Create the game room if it doesn't exist.
@@ -86,10 +85,11 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, user_id: str):
             for _ in range(5):
                 if game["deck"]:
                     game["players"][user_id]["hand"].append(game["deck"].pop())
+            # Set the first player to join as the current turn.
             if game["current_turn"] is None:
                 game["current_turn"] = user_id
 
-        # Send a welcome message including initial state.
+        # Send a welcome message including the player's private hand.
         await manager.send_personal_message({
             "type": "welcome",
             "user": user_id,
@@ -98,7 +98,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, user_id: str):
             "current_turn": game["current_turn"]
         }, websocket)
 
-        # Broadcast that a new player has joined.
+        # Broadcast that a new player has joined (without revealing hands).
         await manager.broadcast(room_id, {
             "type": "player_joined",
             "user": user_id,
@@ -165,6 +165,8 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, user_id: str):
             "user": user_id,
             "message": f"{user_id} has left the game."
         })
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
