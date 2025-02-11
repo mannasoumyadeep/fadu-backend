@@ -6,24 +6,21 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-# Update allowed origins with your deployed frontend URL.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",                   # Local development
-        "https://fadu-frontend.onrender.com"         # Deployed frontend URL on Render
+        "http://localhost:3000",
+        "https://fadu-frontend.onrender.com"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------------------------------
-# Connection Manager for WebSocket
-# -------------------------------
 class ConnectionManager:
     def __init__(self):
-        self.active_connections = {}  # Maps room_id to list of connections
+        self.active_connections = {}
+        self.game_states = {}  # Store game states separately
 
     async def connect(self, room_id: str, websocket: WebSocket):
         await websocket.accept()
@@ -36,6 +33,9 @@ class ConnectionManager:
             self.active_connections[room_id].remove(websocket)
             if not self.active_connections[room_id]:
                 del self.active_connections[room_id]
+                # Clean up game state when room is empty
+                if room_id in self.game_states:
+                    del self.game_states[room_id]
 
     async def send_personal_message(self, message: dict, websocket: WebSocket):
         await websocket.send_json(message)
@@ -45,13 +45,10 @@ class ConnectionManager:
             for connection in self.active_connections[room_id]:
                 await connection.send_json(message)
 
-manager = ConnectionManager()
+    def get_player_count(self, room_id: str) -> int:
+        return len(self.active_connections.get(room_id, []))
 
-# -------------------------------
-# Global Game State
-# -------------------------------
-# Each room holds its own game state: deck, players, table card, current turn.
-games = {}
+manager = ConnectionManager()
 
 def initialize_deck():
     suits = ["Hearts", "Diamonds", "Clubs", "Spades"]
@@ -65,106 +62,153 @@ async def read_root():
     return {"message": "Hello from Fadu backend!"}
 
 @app.websocket("/ws/{room_id}/{user_id}")
-async def websocket_endpoint(websocket, room_id: str, user_id: str):
+async def websocket_endpoint(websocket: WebSocket, room_id: str, user_id: str):
     await manager.connect(room_id, websocket)
     try:
-        # Create the game room if it doesn't exist.
-        if room_id not in games:
-            games[room_id] = {
+        # Initialize game state for new room
+        if room_id not in manager.game_states:
+            manager.game_states[room_id] = {
                 "deck": initialize_deck(),
                 "players": {},
                 "tableCard": None,
-                "current_turn": None
+                "current_turn": None,
+                "game_started": False,
+                "max_players": 2  # Default max players
             }
-        game = games[room_id]
+        
+        game = manager.game_states[room_id]
 
-        # Add the player if not already present.
+        # Add new player to the game
         if user_id not in game["players"]:
-            game["players"][user_id] = {"hand": [], "score": 0}
-            # Deal 5 cards to the new player.
+            # Check if room is full
+            if len(game["players"]) >= game["max_players"]:
+                await manager.send_personal_message({
+                    "type": "error",
+                    "message": "Room is full"
+                }, websocket)
+                await websocket.close()
+                return
+
+            game["players"][user_id] = {
+                "hand": [],
+                "score": 0,
+                "ready": False
+            }
+            
+            # Deal initial cards
             for _ in range(5):
                 if game["deck"]:
                     game["players"][user_id]["hand"].append(game["deck"].pop())
-            # Set the first player to join as the current turn.
+
+            # First player becomes the current turn
             if game["current_turn"] is None:
                 game["current_turn"] = user_id
 
-        # Send a welcome message including the player's private hand.
+        # Send initial game state to the new player
         await manager.send_personal_message({
             "type": "welcome",
             "user": user_id,
             "message": f"Welcome to room {room_id}!",
             "hand": game["players"][user_id]["hand"],
-            "current_turn": game["current_turn"]
+            "current_turn": game["current_turn"],
+            "tableCard": game["tableCard"],
+            "players_in_room": list(game["players"].keys())
         }, websocket)
 
-        # Broadcast that a new player has joined (without revealing hands).
+        # Broadcast new player joined
         await manager.broadcast(room_id, {
             "type": "player_joined",
             "user": user_id,
-            "message": f"{user_id} has joined the game."
+            "message": f"{user_id} has joined the game",
+            "players_in_room": list(game["players"].keys())
         })
 
-        # Listen for incoming messages (actions) from the client.
+        # Main game loop
         while True:
             data = await websocket.receive_text()
             message = json.loads(data)
             action = message.get("action")
 
-            if action == "draw_card":
+            if action == "draw_card" and game["current_turn"] == user_id:
                 if game["deck"]:
                     card = game["deck"].pop()
                     game["players"][user_id]["hand"].append(card)
+                    # Update player's hand
                     await manager.send_personal_message({
                         "type": "update_hand",
                         "hand": game["players"][user_id]["hand"],
-                        "message": "Card drawn."
+                        "deck_count": len(game["deck"])
                     }, websocket)
+                    # Broadcast deck count update
+                    await manager.broadcast(room_id, {
+                        "type": "deck_update",
+                        "deck_count": len(game["deck"])
+                    })
                 else:
                     await manager.send_personal_message({
                         "type": "error",
-                        "message": "Deck is empty."
+                        "message": "Deck is empty"
                     }, websocket)
-            elif action == "play_card":
+
+            elif action == "play_card" and game["current_turn"] == user_id:
                 card_index = message.get("cardIndex")
                 if card_index is not None:
                     try:
                         card = game["players"][user_id]["hand"].pop(card_index)
                         game["tableCard"] = card
+                        
+                        # Update the player's hand
+                        await manager.send_personal_message({
+                            "type": "update_hand",
+                            "hand": game["players"][user_id]["hand"]
+                        }, websocket)
+
+                        # Broadcast the played card
                         await manager.broadcast(room_id, {
                             "type": "table_update",
                             "tableCard": card,
-                            "message": f"{user_id} played a card."
+                            "played_by": user_id
                         })
-                        await manager.send_personal_message({
-                            "type": "update_hand",
-                            "hand": game["players"][user_id]["hand"],
-                            "message": "Card played."
-                        }, websocket)
+
+                        # Move to next player
+                        players = list(game["players"].keys())
+                        current_index = players.index(user_id)
+                        next_index = (current_index + 1) % len(players)
+                        game["current_turn"] = players[next_index]
+
+                        # Broadcast turn update
+                        await manager.broadcast(room_id, {
+                            "type": "turn_update",
+                            "current_turn": game["current_turn"]
+                        })
                     except IndexError:
                         await manager.send_personal_message({
                             "type": "error",
-                            "message": "Invalid card index."
+                            "message": "Invalid card index"
                         }, websocket)
+
             elif action == "call":
                 await manager.broadcast(room_id, {
                     "type": "call",
+                    "user": user_id,
                     "message": f"{user_id} called!"
                 })
-            else:
-                await manager.send_personal_message({
-                    "type": "echo",
-                    "message": f"Received unknown action: {action}"
-                }, websocket)
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
+
+    except WebSocketDisconnect:
         manager.disconnect(room_id, websocket)
-        await manager.broadcast(room_id, {
-            "type": "player_left",
-            "user": user_id,
-            "message": f"{user_id} has left the game."
-        })
+        if room_id in manager.game_states and user_id in manager.game_states[room_id]["players"]:
+            del manager.game_states[room_id]["players"][user_id]
+            # Reset turn if it was this player's turn
+            if game["current_turn"] == user_id:
+                players = list(game["players"].keys())
+                if players:
+                    game["current_turn"] = players[0]
+            await manager.broadcast(room_id, {
+                "type": "player_left",
+                "user": user_id,
+                "current_turn": game["current_turn"],
+                "players_in_room": list(game["players"].keys())
+            })
 
 if __name__ == "__main__":
     import uvicorn
