@@ -1,5 +1,7 @@
-fastapi==0.95.1
-uvicorn==0.22.0
-python-socketio==5.12.1
-python-engineio==4.11.2
-aiohttp>=3.8.5rc1
+fastapi
+uvicorn
+python-socketio
+aiohttp
+python-dotenv
+websockets
+
