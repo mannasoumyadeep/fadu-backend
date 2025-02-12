@@ -1,38 +1,30 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Wed Feb 12 14:20:48 2025
-
-@author: prate
-"""
-
-# backend/app.py
 import os
 import random
 import socketio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Create FastAPI app and Socket.IO server
+# Create main application
 app = FastAPI()
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 
-# Enable CORS for your frontend domains
+# CORS middleware for allowed origins (adjust these as needed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",              # for local testing
-        "https://fadu.netlify.app",             # your deployed frontend (example)
-        "https://fadu-frontend.onrender.com"    # another possible frontend URL
+        "http://localhost:3000",
+        "https://fadu.netlify.app",
+        "https://fadu-frontend.onrender.com"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Class to manage game state
+# Game state storage with improved table logic (list of played cards)
 class GameState:
     def __init__(self):
-        self.rooms = {}         # Stores room information
+        self.rooms = {}         # Dictionary to store room information
         self.player_rooms = {}  # Maps each player to their room
 
     def create_room(self, room_id, max_players=2):
@@ -40,7 +32,7 @@ class GameState:
             self.rooms[room_id] = {
                 "players": {},
                 "deck": self.initialize_deck(),
-                "table_card": None,
+                "table_cards": [],  # Changed from a single card to a list of cards
                 "current_turn": None,
                 "max_players": max_players,
                 "game_started": False
@@ -81,17 +73,14 @@ class GameState:
             if player_id in room["players"]:
                 del room["players"][player_id]
                 del self.player_rooms[player_id]
-                # If the removed player was on turn, update to the next player
                 if room["current_turn"] == player_id:
                     players = list(room["players"].keys())
                     room["current_turn"] = players[0] if players else None
-                # Remove room if no players remain
                 if not room["players"]:
                     del self.rooms[room_id]
                 return room_id
         return None
 
-# Create a single global game state instance
 game_state = GameState()
 
 # Socket.IO event handlers
@@ -116,15 +105,15 @@ async def join_room(sid, data):
     if game_state.add_player(room_id, player_id):
         sio.enter_room(sid, room_id)
         
-        # Send the initial game state to the newly joined player
+        # Send initial game state to the new player, including their hand and current table cards
         await sio.emit('game_state', {
             "hand": room["players"][player_id]["hand"],
-            "table_card": room["table_card"],
+            "table_cards": room["table_cards"],
             "current_turn": room["current_turn"],
             "players": list(room["players"].keys())
         }, room=sid)
 
-        # Inform other players that a new player has joined
+        # Notify other players that a new player has joined
         await sio.emit('player_joined', {
             "player_id": player_id,
             "players": list(room["players"].keys())
@@ -142,30 +131,30 @@ async def play_card(sid, data):
             try:
                 player_hand = room["players"][player_id]["hand"]
                 card = player_hand.pop(card_index)
-                room["table_card"] = card
+                # Append the played card to the table_cards list
+                room["table_cards"].append(card)
 
-                # Update turn: move to the next player
+                # Update turn to the next player
                 players = list(room["players"].keys())
                 current_index = players.index(player_id)
                 next_index = (current_index + 1) % len(players)
                 room["current_turn"] = players[next_index]
 
-                # Broadcast the played card and current turn
+                # Broadcast the played card and updated table to all players
                 await sio.emit('card_played', {
                     "player_id": player_id,
-                    "table_card": card,
+                    "card": card,
+                    "table_cards": room["table_cards"],
                     "current_turn": room["current_turn"]
                 }, room=room_id)
 
-                # Send updated hand back to the player who played the card
+                # Update the player's hand on their client
                 await sio.emit('hand_updated', {
                     "hand": player_hand
                 }, room=sid)
 
             except (IndexError, KeyError):
-                await sio.emit('error', {
-                    "message": "Invalid card index"
-                }, room=sid)
+                await sio.emit('error', {"message": "Invalid card index"}, room=sid)
 
 @sio.event
 async def draw_card(sid, data):
@@ -187,12 +176,11 @@ async def draw_card(sid, data):
                 "deck_count": len(room["deck"])
             }, room=room_id)
 
-# A simple HTTP route for testing purposes
 @app.get("/")
 async def read_root():
     return {"message": "Hello from Fadu backend!"}
 
-# Mount the Socket.IO ASGI application over the FastAPI app
+# Mount Socket.IO app over FastAPI
 socket_app = socketio.ASGIApp(sio, app)
 app = socket_app
 
