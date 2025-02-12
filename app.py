@@ -4,10 +4,11 @@ import socketio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+# Initialize FastAPI and Socket.IO
 app = FastAPI()
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 
-# Allow CORS for specified origins (update as needed)
+# Set up CORS middleware (adjust allowed origins as needed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -19,18 +20,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Game state storage with improved table logic
+# Game state container with improved table logic and call event
 class GameState:
     def __init__(self):
-        self.rooms = {}         # Stores room info
-        self.player_rooms = {}  # Maps each player to their room
+        self.rooms = {}         # Holds room data
+        self.player_rooms = {}  # Maps player IDs to room IDs
 
     def create_room(self, room_id, max_players=4):
         if room_id not in self.rooms:
             self.rooms[room_id] = {
                 "players": {},
                 "deck": self.initialize_deck(),
-                "table_cards": [],  # List of played cards
+                "table_cards": [],  # List to hold played cards
                 "current_turn": None,
                 "max_players": max_players,
                 "game_started": False
@@ -39,8 +40,7 @@ class GameState:
 
     def initialize_deck(self):
         suits = ["Hearts", "Diamonds", "Clubs", "Spades"]
-        # Use values 1-13 (1: Ace, 11: Jack, 12: Queen, 13: King)
-        values = list(range(1, 14))
+        values = list(range(1, 14))  # 1 to 13 (Ace,2,...,King)
         deck = [{"suit": suit, "value": value} for suit in suits for value in values]
         random.shuffle(deck)
         return deck
@@ -54,9 +54,11 @@ class GameState:
                     "score": 0
                 }
                 self.player_rooms[player_id] = room_id
+                # Deal 5 cards to the player
                 for _ in range(5):
                     if room["deck"]:
                         room["players"][player_id]["hand"].append(room["deck"].pop())
+                # Set the first player to join as the current turn
                 if room["current_turn"] is None:
                     room["current_turn"] = player_id
                 return True
@@ -120,6 +122,7 @@ async def play_card(sid, data):
                 player_hand = room["players"][player_id]["hand"]
                 card = player_hand.pop(card_index)
                 room["table_cards"].append(card)
+                # Rotate turn to next player
                 players = list(room["players"].keys())
                 current_index = players.index(player_id)
                 next_index = (current_index + 1) % len(players)
@@ -147,9 +150,7 @@ async def draw_card(sid, data):
                 "hand": room["players"][player_id]["hand"],
                 "deck_count": len(room["deck"])
             }, room=sid)
-            await sio.emit('deck_updated', {
-                "deck_count": len(room["deck"])
-            }, room=room_id)
+            await sio.emit('deck_updated', {"deck_count": len(room["deck"])}, room=room_id)
 
 @sio.event
 async def call(sid, data):
@@ -157,13 +158,14 @@ async def call(sid, data):
     room_id = game_state.player_rooms.get(player_id)
     if room_id and room_id in game_state.rooms:
         room = game_state.rooms[room_id]
-        # Calculate hand totals for each player
+        # Calculate the sum of card values for each player
         player_sums = {}
-        for pid, pinfo in room["players"].items():
-            player_sums[pid] = sum(card["value"] for card in pinfo["hand"])
+        for pid, info in room["players"].items():
+            player_sums[pid] = sum(card["value"] for card in info["hand"])
         caller_sum = player_sums.get(player_id, 0)
         lowest_sum = min(player_sums.values()) if player_sums else 0
         winners = [pid for pid, total in player_sums.items() if total == lowest_sum]
+        # Caller wins if they uniquely have the lowest sum; otherwise, they lose 1 point
         if caller_sum == lowest_sum and len(winners) == 1:
             room["players"][player_id]["score"] += 2
             result = "win"
