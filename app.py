@@ -21,15 +21,15 @@ app.add_middleware(
 
 class GameState:
     def __init__(self):
-        self.rooms = {}         # { room_id: { players, deck, table_cards, current_turn, ... } }
-        self.player_rooms = {}  # { player_id: room_id }
+        self.rooms = {}         # Holds room data
+        self.player_rooms = {}  # Maps player IDs to room IDs
 
     def create_room(self, room_id, max_players=4):
         if room_id not in self.rooms:
             self.rooms[room_id] = {
                 "players": {},
                 "deck": self.initialize_deck(),
-                "table_cards": [],
+                "table_cards": [],  # Played cards
                 "current_turn": None,
                 "max_players": max_players,
                 "game_started": False
@@ -58,8 +58,23 @@ class GameState:
             return True
         return False
 
+    def remove_player(self, player_id):
+        if player_id in self.player_rooms:
+            room_id = self.player_rooms[player_id]
+            room = self.rooms[room_id]
+            if player_id in room["players"]:
+                del room["players"][player_id]
+                del self.player_rooms[player_id]
+                if room["current_turn"] == player_id:
+                    players = list(room["players"].keys())
+                    room["current_turn"] = players[0] if players else None
+                if not room["players"]:
+                    del self.rooms[room_id]
+                return room_id
+        return None
+
     def reshuffle_deck(self, room):
-        # When the deck is empty, reshuffle all played cards except the top one
+        # When deck is empty, reshuffle all played cards except the top one
         if not room["deck"] and len(room["table_cards"]) > 1:
             top_card = room["table_cards"][-1]
             cards_to_reshuffle = room["table_cards"][:-1]
@@ -101,8 +116,8 @@ async def join_room(sid, data):
 @sio.event
 async def play_card(sid, data):
     """
-    data expects: { player_id, card_indices: [array of indices] }
-    If table_cards is not empty, all selected cards must match the top card's value.
+    Expects: { player_id: <id>, card_indices: [list of indices] }
+    If table_cards is not empty, each selected card must match the top card's value.
     """
     player_id = data.get("player_id")
     card_indices = data.get("card_indices")
@@ -113,27 +128,28 @@ async def play_card(sid, data):
             await sio.emit("error", {"message": "Not your turn"}, room=sid)
             return
         player_hand = room["players"][player_id]["hand"]
+        # Validate indices
         if any(i < 0 or i >= len(player_hand) for i in card_indices):
             await sio.emit("error", {"message": "Invalid card index"}, room=sid)
             return
-        # If table is not empty, enforce matching condition
+        # If table is not empty, enforce that all played cards match the top card's value
         if room["table_cards"]:
-            top_card = room["table_cards"][-1]
+            top_value = room["table_cards"][-1]["value"]
             for i in card_indices:
-                if player_hand[i]["value"] != top_card["value"]:
-                    await sio.emit("error", {"message": "Played cards must match top card value"}, room=sid)
+                if player_hand[i]["value"] !== top_value:
+                    await sio.emit("error", {"message": "All played cards must match the top card"}, room=sid)
                     return
-        # Remove cards from hand (sort indices in descending order to avoid index shift)
+        # Remove selected cards; sort indices descending to avoid shifting
         card_indices = sorted(card_indices, reverse=True)
         played_cards = []
         for i in card_indices:
             played_cards.append(player_hand.pop(i))
         room["table_cards"].extend(played_cards)
-        # Rotate turn: simple round-robin
-        players = list(room["players"].keys())
-        current_index = players.index(player_id)
-        next_index = (current_index + 1) % len(players)
-        room["current_turn"] = players[next_index]
+        # Rotate turn (simple round-robin)
+        players_list = list(room["players"].keys())
+        current_index = players_list.index(player_id)
+        next_index = (current_index + 1) % len(players_list)
+        room["current_turn"] = players_list[next_index]
         await sio.emit("card_played", {
             "player_id": player_id,
             "played_cards": played_cards,
@@ -170,12 +186,12 @@ async def call(sid, data):
     room_id = game_state.player_rooms.get(player_id)
     if room_id and room_id in game_state.rooms:
         room = game_state.rooms[room_id]
-        # Calculate each player's hand total
+        # Calculate hand totals for each player
         player_sums = {pid: sum(card["value"] for card in info["hand"]) for pid, info in room["players"].items()}
         caller_sum = player_sums.get(player_id, 0)
         lowest_sum = min(player_sums.values()) if player_sums else 0
         winners = [pid for pid, total in player_sums.items() if total == lowest_sum]
-        if caller_sum == lowest_sum and len(winners) == 1:
+        if caller_sum == lowest_sum and len(winners) == 1:  # use proper equality in Python: ==
             room["players"][player_id]["score"] += 2
             result = "win"
         else:
