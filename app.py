@@ -4,23 +4,22 @@ import socketio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Initialize FastAPI and Socket.IO
 app = FastAPI()
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 
-# Set up CORS middleware (adjust allowed origins as needed)
+# Allow CORS for your frontend domain(s)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",
-        "https://your-frontend-domain.netlify.app"
+        "http://localhost:3000",  # local development
+        "https://your-frontend-domain.netlify.app"  # deployed frontend URL
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Game state container with improved table logic and call event
+# Game state with improved logic
 class GameState:
     def __init__(self):
         self.rooms = {}         # Holds room data
@@ -39,8 +38,9 @@ class GameState:
         return self.rooms[room_id]
 
     def initialize_deck(self):
-        suits = ["Hearts", "Diamonds", "Clubs", "Spades"]
-        values = list(range(1, 14))  # 1 to 13 (Ace,2,...,King)
+        # Use lowercase for suits to match image file names
+        suits = ["hearts", "diamonds", "clubs", "spades"]
+        values = list(range(1, 14))  # 1 (Ace) to 13 (King)
         deck = [{"suit": suit, "value": value} for suit in suits for value in values]
         random.shuffle(deck)
         return deck
@@ -58,7 +58,7 @@ class GameState:
                 for _ in range(5):
                     if room["deck"]:
                         room["players"][player_id]["hand"].append(room["deck"].pop())
-                # Set the first player to join as the current turn
+                # Set first player as current turn
                 if room["current_turn"] is None:
                     room["current_turn"] = player_id
                 return True
@@ -158,14 +158,13 @@ async def call(sid, data):
     room_id = game_state.player_rooms.get(player_id)
     if room_id and room_id in game_state.rooms:
         room = game_state.rooms[room_id]
-        # Calculate the sum of card values for each player
+        # Calculate hand totals for each player
         player_sums = {}
         for pid, info in room["players"].items():
             player_sums[pid] = sum(card["value"] for card in info["hand"])
         caller_sum = player_sums.get(player_id, 0)
         lowest_sum = min(player_sums.values()) if player_sums else 0
         winners = [pid for pid, total in player_sums.items() if total == lowest_sum]
-        # Caller wins if they uniquely have the lowest sum; otherwise, they lose 1 point
         if caller_sum == lowest_sum and len(winners) == 1:
             room["players"][player_id]["score"] += 2
             result = "win"
