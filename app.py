@@ -7,12 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI()
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 
-# Allow CORS for your frontend domains
+# Allow CORS for your frontend domain(s)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",
-        "https://your-frontend-domain.netlify.app"
+        "http://localhost:3000",                # For local development
+        "https://your-frontend-domain.netlify.app"  # Replace with your deployed frontend URL
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -21,7 +21,7 @@ app.add_middleware(
 
 class GameState:
     def __init__(self):
-        self.rooms = {}         # Holds room data
+        self.rooms = {}         # Dictionary to store room data
         self.player_rooms = {}  # Maps player IDs to room IDs
 
     def create_room(self, room_id, max_players=4):
@@ -29,7 +29,7 @@ class GameState:
             self.rooms[room_id] = {
                 "players": {},
                 "deck": self.initialize_deck(),
-                "table_cards": [],  # Played cards
+                "table_cards": [],  # List to hold played cards
                 "current_turn": None,
                 "max_players": max_players,
                 "game_started": False
@@ -37,7 +37,7 @@ class GameState:
         return self.rooms[room_id]
 
     def initialize_deck(self):
-        # Use lowercase suit names to match image file names
+        # Use lowercase suit names to match image file names (SVG)
         suits = ["hearts", "diamonds", "clubs", "spades"]
         values = list(range(1, 14))  # 1 (Ace) to 13 (King)
         deck = [{"suit": suit, "value": value} for suit in suits for value in values]
@@ -53,6 +53,7 @@ class GameState:
             for _ in range(5):
                 if room["deck"]:
                     room["players"][player_id]["hand"].append(room["deck"].pop())
+            # Set the first player as the current turn
             if room["current_turn"] is None:
                 room["current_turn"] = player_id
             return True
@@ -74,7 +75,7 @@ class GameState:
         return None
 
     def reshuffle_deck(self, room):
-        # When deck is empty, reshuffle all played cards except the top one
+        # When deck is empty, reshuffle played cards (except the top one)
         if not room["deck"] and len(room["table_cards"]) > 1:
             top_card = room["table_cards"][-1]
             cards_to_reshuffle = room["table_cards"][:-1]
@@ -116,8 +117,8 @@ async def join_room(sid, data):
 @sio.event
 async def play_card(sid, data):
     """
-    Expects: { player_id: <id>, card_indices: [list of indices] }
-    If table_cards is not empty, each selected card must match the top card's value.
+    Expects data: { player_id: <id>, card_indices: [list of indices] }
+    If table_cards exists, each selected card must match the top card's value.
     """
     player_id = data.get("player_id")
     card_indices = data.get("card_indices")
@@ -128,18 +129,17 @@ async def play_card(sid, data):
             await sio.emit("error", {"message": "Not your turn"}, room=sid)
             return
         player_hand = room["players"][player_id]["hand"]
-        # Validate indices
         if any(i < 0 or i >= len(player_hand) for i in card_indices):
             await sio.emit("error", {"message": "Invalid card index"}, room=sid)
             return
-        # If table is not empty, enforce that all played cards match the top card's value
+        # If there is a top card, ensure all selected cards match its value
         if room["table_cards"]:
             top_value = room["table_cards"][-1]["value"]
             for i in card_indices:
-                if player_hand[i]["value"] !== top_value:
+                if player_hand[i]["value"] != top_value:
                     await sio.emit("error", {"message": "All played cards must match the top card"}, room=sid)
                     return
-        # Remove selected cards; sort indices descending to avoid shifting
+        # Remove selected cards (sort descending to avoid index shift)
         card_indices = sorted(card_indices, reverse=True)
         played_cards = []
         for i in card_indices:
@@ -191,7 +191,7 @@ async def call(sid, data):
         caller_sum = player_sums.get(player_id, 0)
         lowest_sum = min(player_sums.values()) if player_sums else 0
         winners = [pid for pid, total in player_sums.items() if total == lowest_sum]
-        if caller_sum == lowest_sum and len(winners) == 1:  # use proper equality in Python: ==
+        if caller_sum == lowest_sum and len(winners) == 1:
             room["players"][player_id]["score"] += 2
             result = "win"
         else:
