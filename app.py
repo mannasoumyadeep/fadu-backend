@@ -5,32 +5,31 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
-sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 
-# Allow CORS for your frontend domain(s)
+# Allow CORS for your frontend domains
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",  # local development
-        "https://your-frontend-domain.netlify.app"  # deployed frontend URL
+        "http://localhost:3000",
+        "https://your-frontend-domain.netlify.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Game state with improved logic
 class GameState:
     def __init__(self):
-        self.rooms = {}         # Holds room data
-        self.player_rooms = {}  # Maps player IDs to room IDs
+        self.rooms = {}         # { room_id: { players, deck, table_cards, current_turn, ... } }
+        self.player_rooms = {}  # { player_id: room_id }
 
     def create_room(self, room_id, max_players=4):
         if room_id not in self.rooms:
             self.rooms[room_id] = {
                 "players": {},
                 "deck": self.initialize_deck(),
-                "table_cards": [],  # List to hold played cards
+                "table_cards": [],
                 "current_turn": None,
                 "max_players": max_players,
                 "game_started": False
@@ -38,7 +37,7 @@ class GameState:
         return self.rooms[room_id]
 
     def initialize_deck(self):
-        # Use lowercase for suits to match image file names
+        # Use lowercase suit names to match image file names
         suits = ["hearts", "diamonds", "clubs", "spades"]
         values = list(range(1, 14))  # 1 (Ace) to 13 (King)
         deck = [{"suit": suit, "value": value} for suit in suits for value in values]
@@ -46,38 +45,27 @@ class GameState:
         return deck
 
     def add_player(self, room_id, player_id):
-        if room_id in self.rooms:
-            room = self.rooms[room_id]
-            if len(room["players"]) < room["max_players"]:
-                room["players"][player_id] = {
-                    "hand": [],
-                    "score": 0
-                }
-                self.player_rooms[player_id] = room_id
-                # Deal 5 cards to the player
-                for _ in range(5):
-                    if room["deck"]:
-                        room["players"][player_id]["hand"].append(room["deck"].pop())
-                # Set first player as current turn
-                if room["current_turn"] is None:
-                    room["current_turn"] = player_id
-                return True
+        room = self.rooms.get(room_id)
+        if room and len(room["players"]) < room["max_players"]:
+            room["players"][player_id] = {"hand": [], "score": 0}
+            self.player_rooms[player_id] = room_id
+            # Deal 5 cards to the player
+            for _ in range(5):
+                if room["deck"]:
+                    room["players"][player_id]["hand"].append(room["deck"].pop())
+            if room["current_turn"] is None:
+                room["current_turn"] = player_id
+            return True
         return False
 
-    def remove_player(self, player_id):
-        if player_id in self.player_rooms:
-            room_id = self.player_rooms[player_id]
-            room = self.rooms[room_id]
-            if player_id in room["players"]:
-                del room["players"][player_id]
-                del self.player_rooms[player_id]
-                if room["current_turn"] == player_id:
-                    players = list(room["players"].keys())
-                    room["current_turn"] = players[0] if players else None
-                if not room["players"]:
-                    del self.rooms[room_id]
-                return room_id
-        return None
+    def reshuffle_deck(self, room):
+        # When the deck is empty, reshuffle all played cards except the top one
+        if not room["deck"] and len(room["table_cards"]) > 1:
+            top_card = room["table_cards"][-1]
+            cards_to_reshuffle = room["table_cards"][:-1]
+            random.shuffle(cards_to_reshuffle)
+            room["deck"] = cards_to_reshuffle
+            room["table_cards"] = [top_card]
 
 game_state = GameState()
 
@@ -91,77 +79,99 @@ async def disconnect(sid):
 
 @sio.event
 async def join_room(sid, data):
-    room_id = data.get('room_id')
-    player_id = data.get('player_id')
+    room_id = data.get("room_id")
+    player_id = data.get("player_id")
     if not room_id or not player_id:
-        await sio.emit('error', {"message": "Missing room_id or player_id"}, room=sid)
+        await sio.emit("error", {"message": "Missing room_id or player_id"}, room=sid)
         return
     room = game_state.create_room(room_id)
     if game_state.add_player(room_id, player_id):
         sio.enter_room(sid, room_id)
-        await sio.emit('game_state', {
+        await sio.emit("game_state", {
             "hand": room["players"][player_id]["hand"],
             "table_cards": room["table_cards"],
             "current_turn": room["current_turn"],
             "players": list(room["players"].keys())
         }, room=sid)
-        await sio.emit('player_joined', {
+        await sio.emit("player_joined", {
             "player_id": player_id,
             "players": list(room["players"].keys())
         }, room=room_id, skip_sid=sid)
 
 @sio.event
 async def play_card(sid, data):
-    player_id = data.get('player_id')
+    """
+    data expects: { player_id, card_indices: [array of indices] }
+    If table_cards is not empty, all selected cards must match the top card's value.
+    """
+    player_id = data.get("player_id")
+    card_indices = data.get("card_indices")
     room_id = game_state.player_rooms.get(player_id)
-    card_index = data.get('card_index')
-    if room_id and room_id in game_state.rooms:
+    if room_id and room_id in game_state.rooms and isinstance(card_indices, list):
         room = game_state.rooms[room_id]
-        if room["current_turn"] == player_id and card_index is not None:
-            try:
-                player_hand = room["players"][player_id]["hand"]
-                card = player_hand.pop(card_index)
-                room["table_cards"].append(card)
-                # Rotate turn to next player
-                players = list(room["players"].keys())
-                current_index = players.index(player_id)
-                next_index = (current_index + 1) % len(players)
-                room["current_turn"] = players[next_index]
-                await sio.emit('card_played', {
-                    "player_id": player_id,
-                    "card": card,
-                    "table_cards": room["table_cards"],
-                    "current_turn": room["current_turn"]
-                }, room=room_id)
-                await sio.emit('hand_updated', {"hand": player_hand}, room=sid)
-            except (IndexError, KeyError):
-                await sio.emit('error', {"message": "Invalid card index"}, room=sid)
+        if room["current_turn"] != player_id:
+            await sio.emit("error", {"message": "Not your turn"}, room=sid)
+            return
+        player_hand = room["players"][player_id]["hand"]
+        if any(i < 0 or i >= len(player_hand) for i in card_indices):
+            await sio.emit("error", {"message": "Invalid card index"}, room=sid)
+            return
+        # If table is not empty, enforce matching condition
+        if room["table_cards"]:
+            top_card = room["table_cards"][-1]
+            for i in card_indices:
+                if player_hand[i]["value"] != top_card["value"]:
+                    await sio.emit("error", {"message": "Played cards must match top card value"}, room=sid)
+                    return
+        # Remove cards from hand (sort indices in descending order to avoid index shift)
+        card_indices = sorted(card_indices, reverse=True)
+        played_cards = []
+        for i in card_indices:
+            played_cards.append(player_hand.pop(i))
+        room["table_cards"].extend(played_cards)
+        # Rotate turn: simple round-robin
+        players = list(room["players"].keys())
+        current_index = players.index(player_id)
+        next_index = (current_index + 1) % len(players)
+        room["current_turn"] = players[next_index]
+        await sio.emit("card_played", {
+            "player_id": player_id,
+            "played_cards": played_cards,
+            "table_cards": room["table_cards"],
+            "current_turn": room["current_turn"]
+        }, room=room_id)
+        await sio.emit("hand_updated", {"hand": player_hand}, room=sid)
 
 @sio.event
 async def draw_card(sid, data):
-    player_id = data.get('player_id')
+    player_id = data.get("player_id")
     room_id = game_state.player_rooms.get(player_id)
     if room_id and room_id in game_state.rooms:
         room = game_state.rooms[room_id]
-        if room["current_turn"] == player_id and room["deck"]:
+        if room["current_turn"] != player_id:
+            await sio.emit("error", {"message": "Not your turn"}, room=sid)
+            return
+        if not room["deck"]:
+            game_state.reshuffle_deck(room)
+        if room["deck"]:
             card = room["deck"].pop()
             room["players"][player_id]["hand"].append(card)
-            await sio.emit('card_drawn', {
+            await sio.emit("card_drawn", {
                 "hand": room["players"][player_id]["hand"],
                 "deck_count": len(room["deck"])
             }, room=sid)
-            await sio.emit('deck_updated', {"deck_count": len(room["deck"])}, room=room_id)
+            await sio.emit("deck_updated", {"deck_count": len(room["deck"])}, room=room_id)
+        else:
+            await sio.emit("error", {"message": "No cards left in deck"}, room=sid)
 
 @sio.event
 async def call(sid, data):
-    player_id = data.get('player_id')
+    player_id = data.get("player_id")
     room_id = game_state.player_rooms.get(player_id)
     if room_id and room_id in game_state.rooms:
         room = game_state.rooms[room_id]
-        # Calculate hand totals for each player
-        player_sums = {}
-        for pid, info in room["players"].items():
-            player_sums[pid] = sum(card["value"] for card in info["hand"])
+        # Calculate each player's hand total
+        player_sums = {pid: sum(card["value"] for card in info["hand"]) for pid, info in room["players"].items()}
         caller_sum = player_sums.get(player_id, 0)
         lowest_sum = min(player_sums.values()) if player_sums else 0
         winners = [pid for pid, total in player_sums.items() if total == lowest_sum]
