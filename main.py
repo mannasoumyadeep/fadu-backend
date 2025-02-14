@@ -14,7 +14,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "https://fadu.netlify.app",
+        "https://warm-starship-aa706b.netlify.app",
         "https://fadu-frontend.onrender.com"
     ],
     allow_credentials=True,
