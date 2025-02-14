@@ -33,7 +33,7 @@ class GameState:
             self.rooms[room_id] = {
                 "players": {},
                 "deck": self.initialize_deck(),
-                "table_card": None,
+                "table_cards": [],  # Changed from table_card to table_cards array
                 "current_turn": None,
                 "max_players": max_players,
                 "game_started": False
@@ -107,10 +107,10 @@ async def join_room(sid, data):
     if game_state.add_player(room_id, player_id):
         sio.enter_room(sid, room_id)
         
-        # Send initial game state to the new player
+        # Send initial game state to the new player, with table_cards as an array.
         await sio.emit('game_state', {
             "hand": room["players"][player_id]["hand"],
-            "table_card": room["table_card"],
+            "table_cards": room["table_cards"],
             "current_turn": room["current_turn"],
             "players": list(room["players"].keys())
         }, room=sid)
@@ -133,7 +133,8 @@ async def play_card(sid, data):
             try:
                 player_hand = room["players"][player_id]["hand"]
                 card = player_hand.pop(card_index)
-                room["table_card"] = card
+                # Append the played card to the table_cards array
+                room["table_cards"].append(card)
 
                 # Update turn
                 players = list(room["players"].keys())
@@ -141,10 +142,10 @@ async def play_card(sid, data):
                 next_index = (current_index + 1) % len(players)
                 room["current_turn"] = players[next_index]
 
-                # Broadcast updates
-                await sio.emit('card_played', {
+                # Broadcast updates using "cards_played" event with table_cards as an array.
+                await sio.emit('cards_played', {
                     "player_id": player_id,
-                    "table_card": card,
+                    "table_cards": room["table_cards"],
                     "current_turn": room["current_turn"]
                 }, room=room_id)
 
