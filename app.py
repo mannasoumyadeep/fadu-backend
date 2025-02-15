@@ -45,15 +45,11 @@ class GameState:
         if len(room["table_cards"]) <= 1:
             return False
         
-        # Keep the top card
+        # Keep the top card and reshuffle the rest into the deck
         top_card = room["table_cards"][-1]
         cards_to_shuffle = room["table_cards"][:-1]
-        
-        # Shuffle and add back to deck
         random.shuffle(cards_to_shuffle)
         room["deck"].extend(cards_to_shuffle)
-        
-        # Clear table cards except top card
         room["table_cards"] = [top_card]
         return True
 
@@ -64,7 +60,8 @@ class GameState:
                 room["players"][player_id] = {
                     "hand": [],
                     "score": 0,
-                    "is_host": is_host
+                    "is_host": is_host,
+                    "can_play_any": False  # flag set after drawing a card
                 }
                 self.player_rooms[player_id] = room_id
                 
@@ -80,7 +77,6 @@ class GameState:
     def deal_initial_cards(self, room_id, player_id, count=5):
         room = self.rooms[room_id]
         player = room["players"][player_id]
-        
         for _ in range(count):
             if not room["deck"]:
                 if not self.reshuffle_table_cards(room_id):
@@ -92,41 +88,43 @@ class GameState:
         room = self.rooms[room_id]
         player = room["players"][player_id]
         
-        # Check if indices are valid
+        # Validate indices
         if not all(0 <= idx < len(player["hand"]) for idx in card_indices):
             return False
-            
-        # Get selected cards
+        
         selected_cards = [player["hand"][idx] for idx in card_indices]
         
-        # Check if all selected cards have the same value
+        # If the player has drawn a card this turn, allow playing any card.
+        if player.get("can_play_any", False):
+            return True
+        
+        # If table is empty (start of game), allow any card.
+        if not room["table_cards"]:
+            return True
+        
+        # Otherwise, enforce that played cards must match the top card’s value.
+        top_card = room["table_cards"][-1]
         first_value = selected_cards[0]["value"]
-        if not all(card["value"] == first_value for card in selected_cards):
-            return False
-            
-        # If there are table cards, check if the value matches the top card
-        if room["table_cards"]:
-            top_card = room["table_cards"][-1]
-            if first_value != top_card["value"]:
-                return False
-                
-        return True
+        return all(card["value"] == first_value for card in selected_cards) and (first_value == top_card["value"])
 
     def play_cards(self, player_id, card_indices):
         if player_id in self.player_rooms:
             room_id = self.player_rooms[player_id]
             room = self.rooms[room_id]
+            player = room["players"][player_id]
             
             if not self.can_play_cards(room_id, player_id, card_indices):
                 return False
             
-            # Remove cards from hand and add to table
-            player = room["players"][player_id]
+            # Remove cards from hand (largest indices first) and add to table.
             for idx in sorted(card_indices, reverse=True):
                 card = player["hand"].pop(idx)
                 room["table_cards"].append(card)
             
-            # Move to next player
+            # Reset drawn-card flag after playing.
+            player["can_play_any"] = False
+            
+            # Advance turn.
             players = list(room["players"].keys())
             current_index = players.index(player_id)
             next_index = (current_index + 1) % len(players)
@@ -142,7 +140,7 @@ class GameState:
         room_id = self.player_rooms[caller_id]
         room = self.rooms[room_id]
         
-        # Calculate hand values
+        # Sum card values in each player's hand.
         player_sums = {}
         for pid, player in room["players"].items():
             player_sums[pid] = sum(card["value"] for card in player["hand"])
@@ -151,15 +149,15 @@ class GameState:
         lowest_sum = min(player_sums.values())
         winners = [pid for pid, total in player_sums.items() if total == lowest_sum]
         
-        # Update scores
+        # Update scores per new rules.
         if caller_sum == lowest_sum and len(winners) == 1:
-            room["players"][caller_id]["score"] += 2
+            room["players"][caller_id]["score"] += 3  # caller gets +3 points
             result = "win"
         else:
-            room["players"][caller_id]["score"] -= 1
+            room["players"][caller_id]["score"] -= 2  # caller gets -2 points
             for pid in winners:
                 if pid != caller_id:
-                    room["players"][pid]["score"] += 1
+                    room["players"][pid]["score"] += 2  # others get +2 points
             result = "loss"
         
         return {
@@ -214,11 +212,11 @@ async def start_game(sid, data):
         if not room["game_started"] and len(room["players"]) >= 2:
             room["game_started"] = True
             
-            # Deal initial cards
+            # Deal 5 cards to each player.
             for player_id in room["players"]:
                 game_state.deal_initial_cards(room_id, player_id)
             
-            # Set first player
+            # Set the first player as current turn.
             room["current_turn"] = list(room["players"].keys())[0]
             
             await sio.emit('game_started', {
@@ -252,11 +250,20 @@ async def play_cards(sid, data):
             "deck_count": len(room["deck"])
         }, room=room_id)
         
-        # Send updated hand to player
+        # Update the player's hand.
         await sio.emit('hand_updated', {
             "hand": room["players"][player_id]["hand"],
             "deck_count": len(room["deck"])
         }, room=sid)
+        
+        # Check for an instant win (if the player has played all cards).
+        if not room["players"][player_id]["hand"]:
+            room["players"][player_id]["score"] += 4  # +4 points for instant win
+            await sio.emit('round_won', {
+                "player_id": player_id,
+                "score": room["players"][player_id]["score"],
+                "deck_count": len(room["deck"])
+            }, room=room_id)
 
 @sio.event
 async def draw_card(sid, data):
@@ -274,7 +281,11 @@ async def draw_card(sid, data):
                     }, room=room_id)
             
             if room["deck"]:
+                # Draw one card.
                 game_state.deal_initial_cards(room_id, player_id, count=1)
+                # Allow player to play any card after drawing.
+                room["players"][player_id]["can_play_any"] = True
+                
                 await sio.emit('hand_updated', {
                     "hand": room["players"][player_id]["hand"],
                     "deck_count": len(room["deck"])
